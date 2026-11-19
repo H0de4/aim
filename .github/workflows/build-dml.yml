@@ -49,7 +49,12 @@ jobs:
           if (!(Test-Path -LiteralPath $kit -PathType Leaf)) { throw "请将 $kit 原样上传到仓库根目录（不要解压）。" }
           if ((Get-FileHash $kit).Hash -ne '0f15c5354a18663f88e0e45a86b46d3a6d7a3a80ccd1b570ea0f6bd8e5248563') { throw '构建包 SHA-256 不符；请使用与此工作流配套的 ZIP。' }
           Expand-Archive -LiteralPath $kit -DestinationPath zh
-          Copy-Item dep-simpleini/SimpleIni.h engine/sunone_aimbot_2/modules/SimpleIni.h
+          # Windows.h defines max(a,b); leave the bounds check unchanged and protect the C++ member call.
+          $header = [IO.File]::ReadAllText((Resolve-Path dep-simpleini/SimpleIni.h))
+          $oldMax = 'std::numeric_limits<size_t>::max()'
+          if (!$header.Contains($oldMax)) { throw 'Unexpected SimpleIni header revision' }
+          $header = $header.Replace($oldMax, '(std::numeric_limits<size_t>::max)()')
+          [IO.File]::WriteAllText((Join-Path $PWD 'engine/sunone_aimbot_2/modules/SimpleIni.h'), $header)
           Copy-Item zh/fonts engine/fonts -Recurse
           $patch = (Resolve-Path zh/ui-zh.patch).Path
           # Apply to the LF-normalized index, then materialize the result. This
