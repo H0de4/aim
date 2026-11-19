@@ -1,0 +1,93 @@
+name: DirectML 中文单文件
+'on':
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-x64:
+    name: 编译、校验并打包 DirectML x64
+    runs-on: windows-2022
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: 读取本仓库的中文构建包
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: 获取固定版本的 SunOner 源码
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: SunOner/sunone_aimbot_2
+          ref: 03059d5ed2bc2b30f0140b48c01b8992b3e46ffd
+          path: engine
+          persist-credentials: false
+      - name: 准备固定版本的串口库
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: wjwwood/serial
+          ref: 69e0372cf0d3796e84ce9a09aff1d74496f68720
+          path: engine/sunone_aimbot_2/modules/serial
+          persist-credentials: false
+      - name: 准备固定版本的 SimpleIni
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: brofield/simpleini
+          ref: 2b09bcb4fe08e8677b023f31bed1259ee076ee05
+          path: dep-simpleini
+          persist-credentials: false
+      - name: 校验构建包，把中文补丁应用到上游源码
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $kit = 'DML-zhCN-kit.zip'
+          if (!(Test-Path -LiteralPath $kit -PathType Leaf)) { throw "请将 $kit 原样上传到仓库根目录（不要解压）。" }
+          if ((Get-FileHash $kit).Hash -ne '0f15c5354a18663f88e0e45a86b46d3a6d7a3a80ccd1b570ea0f6bd8e5248563') { throw '构建包 SHA-256 不符；请使用与此工作流配套的 ZIP。' }
+          Expand-Archive -LiteralPath $kit -DestinationPath zh
+          Copy-Item dep-simpleini/SimpleIni.h engine/sunone_aimbot_2/modules/SimpleIni.h
+          Copy-Item zh/fonts engine/fonts -Recurse
+          $patch = (Resolve-Path zh/ui-zh.patch).Path
+          # Apply to the LF-normalized index, then materialize the result. This
+          # works even when the Windows runner checks text out with CRLF.
+          git -C engine apply --cached --check --whitespace=nowarn "$patch"
+          if ($LASTEXITCODE) { throw '汉化补丁与上游版本不匹配。' }
+          git -C engine apply --cached --whitespace=nowarn "$patch"
+          if ($LASTEXITCODE) { throw '应用汉化补丁失败。' }
+          git -C engine checkout-index -a -f
+          if ($LASTEXITCODE) { throw '无法生成中文源码。' }
+          git -C engine diff --cached --stat
+      - name: 校验官方 OpenCV 非 CUDA 预编译包
+        run: |
+          $dir = 'engine/sunone_aimbot_2/modules/_downloads'
+          New-Item -Type Directory -Path $dir -Force | Out-Null
+          $pkg = "$dir/opencv-4.13.0-windows.exe"
+          curl.exe --fail --location --retry 3 --output "$pkg" 'https://github.com/opencv/opencv/releases/download/4.13.0/opencv-4.13.0-windows.exe'
+          if ($LASTEXITCODE -or (Get-FileHash $pkg).Hash -ne 'f0e98c302464d6860777a7015065e11b9b271b5394e6ba92663f0cf1fc303f2c') { throw 'OpenCV 下载或校验失败。' }
+          $unpack = Join-Path $env:RUNNER_TEMP 'opencv-4.13-dml'
+          & 7z.exe x "$pkg" "-o$unpack" '-y' '-bso0' 'opencv/build/*'
+          if ($LASTEXITCODE) { throw '无法解压已校验的 OpenCV。' }
+          $parent = 'engine/sunone_aimbot_2/modules/opencv/build'
+          New-Item -Type Directory -Path $parent -Force | Out-Null
+          Move-Item -LiteralPath "$unpack/opencv/build" -Destination "$parent/dml"
+          if (!(Test-Path "$parent/dml/include/opencv2/opencv.hpp")) { throw 'OpenCV 目录结构不符合预期。' }
+      - name: 仅编译 DML，测试主程序与单文件解包
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & .\zh\pack\Package-DML.ps1 -SourceRoot (Resolve-Path engine).Path -OutputFile "$env:GITHUB_WORKSPACE\dist\Sunone-DML-ZH.exe"
+      - name: 检查编译出的主程序，而不只检查启动器
+        run: |
+          python -X utf8 zh/tests/audit_pe.py engine/build/dml-zh/Release/ai.exe
+          if ($LASTEXITCODE) { throw '主程序 DirectML/汉化检查失败。' }
+          $digest = (Get-FileHash dist/Sunone-DML-ZH.exe).Hash
+          "Sunone-DML-ZH.exe · SHA-256: $digest" >> $env:GITHUB_STEP_SUMMARY
+      - name: 上传单个 EXE
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Sunone-DML-ZH-Win64
+          path: dist/Sunone-DML-ZH.exe
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
